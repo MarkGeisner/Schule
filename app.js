@@ -9,6 +9,12 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const byId = (arr, id) => arr.find(x => x.id === id);
+// Adressen tolerant annehmen: Leerzeichen entfernen, fehlendes https:// ergänzen, webcal:// erlauben
+const normUrl = v => {
+  const t = String(v || '').trim().replace(/\s+/g, '');
+  if (!t) return '';
+  return /^[a-z][a-z0-9+.-]*:/i.test(t) ? t : 'https://' + t.replace(/^\/+/, '');
+};
 
 const CATS = ['Unterricht', 'Vorbereitung', 'Korrektur', 'Konferenz / Besprechung', 'Elternarbeit', 'Projekte', 'Verwaltung', 'Fortbildung', 'Sonstiges'];
 const CAT_COLORS = ['#2563eb', '#16a34a', '#dc2626', '#9333ea', '#ea580c', '#0891b2', '#64748b', '#ca8a04', '#a8a29e'];
@@ -179,6 +185,8 @@ function fieldHtml(f, v) {
       return `<div class="field"><span class="label">${esc(f.label)}</span><div class="swatches">${COLORS.map(c => `<label class="swatch" style="--c:${c}"><input type="radio" name="${f.name}" value="${c}" ${c === v ? 'checked' : ''} aria-label="Farbe ${c}"></label>`).join('')}</div></div>`;
     case 'file':
       return `<div class="field">${lab}<input type="file" id="${id}" name="${f.name}">${hint}</div>`;
+    case 'url':
+      return `<div class="field">${lab}<input type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" ${attrs} value="${esc(v)}">${hint}</div>`;
     default:
       return `<div class="field">${lab}<input type="${f.type || 'text'}" ${attrs} value="${esc(v)}" ${f.step ? `step="${f.step}"` : ''} ${f.min != null ? `min="${f.min}"` : ''}>${hint}</div>`;
   }
@@ -191,6 +199,7 @@ function readForm(form, fields) {
     else if (f.type === 'checks') o[f.name] = els.filter(e => e.checked).map(e => e.value);
     else if (f.type === 'color') o[f.name] = (els.find(e => e.checked) || {}).value || COLORS[0];
     else if (f.type === 'file') o[f.name] = els[0].files[0] || null;
+    else if (f.type === 'url') o[f.name] = normUrl(els[0].value);
     else if (f.type === 'number') o[f.name] = els[0].value === '' ? null : Number(els[0].value);
     else o[f.name] = els[0].value.trim();
   }
@@ -536,10 +545,13 @@ async function refreshUntis(silent) {
   try {
     const r = await fetch(url.replace(/^webcal:/i, 'https:'), { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const res = importUntis(await r.text()); render();
+    const res = importUntis(await r.text());
+    S.untis.fetchError = null; save(); render();
     toast(`WebUntis: ${res.count} Stunden geladen, ${res.changes} Änderungen`);
   } catch (e) {
-    if (!silent) toast('Direktabruf von WebUntis nicht möglich – bitte die iCal-Datei importieren');
+    S.untis.fetchError = { at: Date.now(), msg: /HTTP/.test(e.message) ? e.message : 'vom Browser blockiert' };
+    save(); render();
+    if (!silent) toast('Abruf über den Link nicht möglich – Details im WebUntis-Kasten');
   }
 }
 function gridFromUntis() {
@@ -837,6 +849,9 @@ V.stundenplan = () => {
         <div class="actions"><label class="btn primary">iCal-Datei importieren<input type="file" accept=".ics,text/calendar" data-chg="importIcs" hidden></label>
           ${S.settings.untisUrl ? '<button class="btn" data-act="refreshUntis">Über Abo-Link aktualisieren</button>' : ''}
           ${u.events.length ? '<button class="btn" data-act="gridFromUntis">Als Wochenraster übernehmen</button>' : ''}</div>
+        ${S.settings.untisUrl ? (u.fetchError
+          ? `<div class="notice warn small" style="margin-top:12px">Dein Abo-Link ist gespeichert ✓, aber der automatische Abruf hat nicht geklappt (${esc(u.fetchError.msg)}, ${fmtDateShort(isoDate(new Date(u.fetchError.at)))} ${fmtTime(u.fetchError.at)}). WebUntis erlaubt keinen direkten Abruf aus einer Web-App. Bis dahin bitte die iCal-Datei importieren.</div>`
+          : `<p class="small" style="margin-top:12px"><span class="chip ok">Abo-Link gespeichert ✓</span></p>`) : ''}
         <details style="margin-top:12px"><summary class="small"><strong>So bekommst du die Datei aus WebUntis</strong></summary>
           <ol class="small muted" style="padding-left:18px;margin:8px 0 0">
             <li>WebUntis in Safari öffnen (nicht in der Untis-App) und anmelden.</li>
@@ -844,7 +859,7 @@ V.stundenplan = () => {
             <li>Wenn Safari fragt, die Datei in der <em>Dateien</em>-App sichern (nicht zum Kalender hinzufügen). Dann hier „iCal-Datei importieren“ antippen.</li>
             <li>Nach jedem neuen Import zeigt dir der Assistent, was sich geändert hat: Ausfall, Vertretung, Raumwechsel.</li>
           </ol></details>
-        <form class="grid" data-form="untis" style="gap:10px;margin-top:12px">
+        <form class="grid" data-form="untis" novalidate style="gap:10px;margin-top:12px">
           ${fieldHtml({ name: 'untisWebUrl', label: 'Adresse von WebUntis deiner Schule', type: 'url', placeholder: 'https://….webuntis.com/WebUntis/?school=…' }, S.settings.untisWebUrl)}
           ${fieldHtml({ name: 'untisUrl', label: 'iCal-Abo-Link (optional)', type: 'url', placeholder: 'https://… oder webcal://…', hint: 'Falls eure Schule das erlaubt. Viele WebUntis-Server lassen einen Direktabruf aus dem Browser nicht zu, dann bitte die Datei importieren.' }, S.settings.untisUrl)}
           <div><button class="btn sm">Speichern</button></div></form>
@@ -1115,7 +1130,7 @@ V.einstellungen = () => `<div class="page">
   <div class="page-head"><div><h1>Einstellungen</h1></div></div>
   <div class="grid grid-2">
     <section class="card"><h2>Allgemein</h2>
-      <form class="grid" data-form="settings" style="gap:14px">
+      <form class="grid" data-form="settings" novalidate style="gap:14px">
         ${fieldHtml({ name: 'name', label: 'Dein Name (für die Begrüßung)' }, S.settings.name)}
         ${fieldHtml({ name: 'weeklyHours', label: 'Soll-Arbeitszeit pro Woche (Stunden)', type: 'number', step: '0.5', hint: 'NRW-Beamte: 41 h; bei Teilzeit anteilig' }, S.settings.weeklyHours)}
         ${fieldHtml({ name: 'periods', label: 'Unterrichtsstunden pro Tag im Stundenplan', type: 'number', min: 1 }, S.settings.periods)}
@@ -1318,15 +1333,18 @@ document.addEventListener('submit', e => {
     save(); render(); toast('Aufgabe hinzugefügt');
     const inp = $('[data-form="quickTask"] input[name="title"]'); if (inp) inp.focus();
   } else if (form.dataset.form === 'untis') {
-    S.settings.untisWebUrl = form.elements.namedItem('untisWebUrl').value.trim();
-    S.settings.untisUrl = form.elements.namedItem('untisUrl').value.trim();
+    const before = S.settings.untisUrl;
+    S.settings.untisWebUrl = normUrl(form.elements.namedItem('untisWebUrl').value);
+    S.settings.untisUrl = normUrl(form.elements.namedItem('untisUrl').value);
+    if (S.settings.untisUrl !== before) S.untis.fetchError = null;
     save(); render(); toast('Gespeichert');
+    if (S.settings.untisUrl && S.settings.untisUrl !== before) refreshUntis();
   } else if (form.dataset.form === 'settings') {
     const v = n => form.elements.namedItem(n).value.trim();
     S.settings.name = v('name');
     S.settings.weeklyHours = Number(v('weeklyHours')) || 41;
     S.settings.periods = Math.min(14, Math.max(1, Number(v('periods')) || 8));
-    S.settings.logineoUrl = v('logineoUrl');
+    S.settings.logineoUrl = normUrl(v('logineoUrl'));
     save(); render(); toast('Gespeichert');
   }
 });
