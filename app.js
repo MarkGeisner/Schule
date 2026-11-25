@@ -16,6 +16,7 @@ const COLORS = ['#2563eb', '#16a34a', '#dc2626', '#9333ea', '#ea580c', '#0891b2'
 const DAYS = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
 const DAYS_SHORT = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
 const PROJECT_TYPES = ['Erasmus+', 'Fachschaft', 'AG', 'Klassenfahrt', 'Schulentwicklung', 'Wettbewerb', 'Sonstiges'];
+const CONTACT_KINDS = ['Gespräch', 'Telefonat', 'E-Mail', 'Elternbrief', 'Elternsprechtag', 'Nachricht (Schulplattform)', 'Sonstiges'];
 const MAT_STATUS = { vorhanden: 'Vorhanden', arbeit: 'In Arbeit', geplant: 'Noch erstellen' };
 const MAT_STATUS_CLS = { vorhanden: 'ok', arbeit: 'warn', geplant: 'bad' };
 
@@ -41,13 +42,16 @@ const KEY = 'lehrerassistent.v1';
 function emptyState() {
   return {
     version: 1, subjects: [], units: [], materials: [], tasks: [], projects: [], timeEntries: [], timetable: [], timer: null,
-    settings: { name: '', logineoUrl: '', periods: 8, weeklyHours: 41 },
+    classes: [], contacts: [], classEvents: [],
+    untis: { events: [], changes: [], importedAt: null },
+    settings: { name: '', logineoUrl: '', periods: 8, weeklyHours: 41, untisUrl: '', untisWebUrl: '', periodTimes: [] },
   };
 }
 function migrate(d) {
   const e = emptyState();
   for (const k in e) if (d[k] === undefined) d[k] = e[k];
   d.settings = { ...e.settings, ...d.settings };
+  d.untis = { ...e.untis, ...d.untis };
   return d;
 }
 function load() {
@@ -89,6 +93,7 @@ const idb = (() => {
 // ====================================================================
 const subj = id => byId(S.subjects, id);
 const proj = id => byId(S.projects, id);
+const klass = id => byId(S.classes, id);
 const unitsOf = sid => S.units.filter(u => u.subjectId === sid);
 const allLessons = () => S.units.flatMap(u => u.lessons.map(l => ({ ...l, unit: u })));
 
@@ -146,6 +151,7 @@ function toast(msg) {
 }
 const subjectOpts = (none = '— kein Fach —') => [{ value: '', label: none }, ...S.subjects.map(s => ({ value: s.id, label: s.name }))];
 const projectOpts = (none = '— kein Projekt —') => [{ value: '', label: none }, ...S.projects.map(p => ({ value: p.id, label: p.name }))];
+const classOpts = (none = '— keine Klasse —') => [{ value: '', label: none }, ...S.classes.map(c => ({ value: c.id, label: 'Klasse ' + c.name }))];
 const catOpts = () => CATS.map(c => ({ value: c, label: c }));
 const subjectDot = s => s ? `<span class="dot" style="--c:${esc(s.color)}"></span>` : '';
 const pct = x => x == null ? '–' : Math.round(x * 100) + ' %';
@@ -226,6 +232,7 @@ function editSubject(id) {
     fields: [
       { name: 'name', label: 'Fach', required: true, placeholder: 'z. B. Mathematik' },
       { name: 'classes', label: 'Lerngruppen', placeholder: 'z. B. 5a, 7b, Q1-GK', hint: 'Mit Komma trennen' },
+      { name: 'untisKuerzel', label: 'Kürzel in WebUntis', placeholder: 'z. B. M oder E', hint: 'So erkennt der Assistent das Fach im WebUntis-Stundenplan. Mehrere mit Komma trennen.' },
       { name: 'color', label: 'Farbe', type: 'color' },
       { name: 'logineoUrl', label: 'Link zum Logineo-Kurs', type: 'url', placeholder: 'https://…logineonrw-lms.de/course/view.php?id=…', hint: 'Im Logineo-Kurs die Adresse aus der Safari-Adressleiste kopieren.' },
       { name: 'notes', label: 'Notizen (Lehrplan, Lehrwerk, Absprachen …)', type: 'textarea' },
@@ -301,9 +308,14 @@ async function deleteMaterialData(m) {
 
 function editMaterial(id, ctx = {}) {
   const m = id ? byId(S.materials, id) : null;
+  const forClass = ctx.classId || (m && m.classId);
+  const retFields = forClass ? [
+    { name: 'returnTotal', label: 'Rücklauf: wie viele benötigt?', type: 'number', min: 0, hint: 'z. B. Einverständniserklärungen, Abschnitte. Leer lassen, wenn kein Rücklauf nötig ist.' },
+    { name: 'returnCount', label: 'Rücklauf: schon erhalten', type: 'number', min: 0 },
+  ] : [];
   openForm({
     title: m ? 'Material bearbeiten' : 'Neues Material',
-    values: m || { status: 'vorhanden', subjectId: ctx.subjectId || '', projectId: ctx.projectId || '' },
+    values: m || { status: 'vorhanden', subjectId: ctx.subjectId || '', projectId: ctx.projectId || '', classId: ctx.classId || '', returnTotal: ctx.classId ? klass(ctx.classId)?.size : null, returnCount: 0 },
     intro: m && m.fileName ? `<p class="small muted">Gespeicherte Datei: <strong>${esc(m.fileName)}</strong>. Eine neue Datei ersetzt sie.</p>` : '',
     fields: [
       { name: 'title', label: 'Bezeichnung', required: true, placeholder: 'z. B. AB Brüche erweitern' },
@@ -313,6 +325,8 @@ function editMaterial(id, ctx = {}) {
       { name: 'note', label: 'Notiz', type: 'textarea' },
       { name: 'subjectId', label: 'Fach', type: 'select', options: subjectOpts() },
       { name: 'projectId', label: 'Projekt', type: 'select', options: projectOpts() },
+      { name: 'classId', label: 'Klassenleitung', type: 'select', options: classOpts() },
+      ...retFields,
     ],
     onSubmit: async d => {
       const file = d.file; delete d.file;
@@ -356,13 +370,14 @@ function editTask(id, ctx = {}) {
   const t = id ? byId(S.tasks, id) : null;
   openForm({
     title: t ? 'Aufgabe bearbeiten' : 'Neue Aufgabe',
-    values: t || { subjectId: ctx.subjectId || '', projectId: ctx.projectId || '', due: ctx.due || '' },
+    values: t || { subjectId: ctx.subjectId || '', projectId: ctx.projectId || '', classId: ctx.classId || '', due: ctx.due || '' },
     fields: [
       { name: 'title', label: 'Aufgabe', required: true, placeholder: 'z. B. Klassenarbeit 7b korrigieren' },
       { name: 'due', label: 'Fällig am', type: 'date' },
       { name: 'priority', label: 'Wichtig', type: 'checkbox' },
       { name: 'subjectId', label: 'Fach', type: 'select', options: subjectOpts() },
       { name: 'projectId', label: 'Projekt', type: 'select', options: projectOpts() },
+      { name: 'classId', label: 'Klassenleitung', type: 'select', options: classOpts() },
       { name: 'notes', label: 'Notizen', type: 'textarea' },
       { name: 'done', label: 'Erledigt', type: 'checkbox' },
     ],
@@ -402,7 +417,7 @@ function editEntry(id) {
   const e = id ? byId(S.timeEntries, id) : null;
   const now = new Date();
   const v = e ? {
-    date: isoDate(new Date(e.start)), from: fmtTime(e.start), to: fmtTime(e.end), category: e.category, subjectId: e.subjectId, projectId: e.projectId, note: e.note,
+    date: isoDate(new Date(e.start)), from: fmtTime(e.start), to: fmtTime(e.end), category: e.category, subjectId: e.subjectId, projectId: e.projectId, classId: e.classId, note: e.note,
   } : { date: today(), from: `${pad(Math.max(0, now.getHours() - 1))}:00`, to: `${pad(now.getHours())}:00`, category: 'Vorbereitung' };
   openForm({
     title: e ? 'Zeiteintrag bearbeiten' : 'Zeit nachtragen',
@@ -414,13 +429,14 @@ function editEntry(id) {
       { name: 'category', label: 'Tätigkeit', type: 'select', options: catOpts() },
       { name: 'subjectId', label: 'Fach', type: 'select', options: subjectOpts() },
       { name: 'projectId', label: 'Projekt', type: 'select', options: projectOpts() },
+      { name: 'classId', label: 'Klasse', type: 'select', options: classOpts() },
       { name: 'note', label: 'Notiz', type: 'text' },
     ],
     onSubmit: d => {
       const start = new Date(`${d.date}T${d.from}`).getTime();
       let end = new Date(`${d.date}T${d.to}`).getTime();
       if (end <= start) end += 864e5; // über Mitternacht
-      const rec = { start, end, category: d.category, subjectId: d.subjectId, projectId: d.projectId, note: d.note };
+      const rec = { start, end, category: d.category, subjectId: d.subjectId, projectId: d.projectId, classId: d.classId, note: d.note };
       if (e) Object.assign(e, rec); else S.timeEntries.push({ id: uid(), ...rec });
     },
     onDelete: e && (() => { S.timeEntries = S.timeEntries.filter(x => x !== e); }),
@@ -444,24 +460,227 @@ function editSlot(day, period) {
   });
 }
 
-// Termine einer Reihe aus dem Stundenplan ableiten
+// ====================================================================
+// WebUntis (iCal-Import, Änderungserkennung)
+// ====================================================================
+const icsUnescape = v => String(v || '').replace(/\\n/gi, '\n').replace(/\\([,;\\])/g, '$1').trim();
+function parseIcsDate(v) {
+  const m = String(v || '').match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?/);
+  if (!m) return NaN;
+  const [, y, mo, d, h = '00', mi = '00', se = '00', z] = m;
+  return z ? Date.UTC(+y, mo - 1, +d, +h, +mi, +se) : new Date(+y, mo - 1, +d, +h, +mi, +se).getTime();
+}
+function parseIcs(text) {
+  const lines = String(text).replace(/\r?\n[ \t]/g, '').split(/\r?\n/);
+  const out = []; let cur = null;
+  for (const line of lines) {
+    if (line === 'BEGIN:VEVENT') { cur = {}; continue; }
+    if (line === 'END:VEVENT') { if (cur && cur.DTSTART) out.push(cur); cur = null; continue; }
+    if (!cur) continue;
+    const i = line.indexOf(':'); if (i < 0) continue;
+    cur[line.slice(0, i).split(';')[0].toUpperCase()] = line.slice(i + 1);
+  }
+  return out.map(e => ({
+    start: parseIcsDate(e.DTSTART), end: parseIcsDate(e.DTEND || e.DTSTART),
+    summary: icsUnescape(e.SUMMARY), location: icsUnescape(e.LOCATION), description: icsUnescape(e.DESCRIPTION),
+    status: (e.STATUS || '').toUpperCase(),
+  })).filter(e => !isNaN(e.start));
+}
+const isCancelled = e => e.status === 'CANCELLED' || /entf(ä|ae)ll|ausfall|cancel/i.test(`${e.summary} ${e.description}`);
+const untisTokens = e => `${e.summary} ${e.description}`.toLowerCase().split(/[\s,;:/()]+/).filter(Boolean);
+function untisSubject(e) {
+  const tokens = untisTokens(e); const txt = `${e.summary} ${e.description}`.toLowerCase();
+  return S.subjects.find(su => (su.untisKuerzel || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean).some(k => tokens.includes(k))
+    || txt.includes(su.name.toLowerCase())) || null;
+}
+function untisClass(e, su) {
+  const tokens = untisTokens(e);
+  const cands = [...(su?.classes || '').split(','), ...S.classes.map(c => c.name)].map(x => x.trim()).filter(Boolean);
+  return cands.find(c => tokens.includes(c.toLowerCase())) || '';
+}
+const untisDay = iso => S.untis.events.filter(e => isoDate(new Date(e.start)) === iso).sort((a, b) => a.start - b.start);
+const untisChangeFor = e => S.untis.changes.find(c => c.ev.start === e.start && c.ev.summary === e.summary);
+const futureChanges = () => S.untis.changes.filter(c => c.ev.end >= Date.now());
+
+function importUntis(text) {
+  const evs = parseIcs(text);
+  if (!evs.length) throw new Error('Keine Stunden in der Datei gefunden');
+  const now = Date.now(), from = parseIso(addDays(today(), -14)).getTime();
+  const keep = evs.filter(e => e.start >= from).sort((a, b) => a.start - b.start);
+  const changes = [];
+  const old = S.untis.events.filter(e => e.start >= now);
+  if (S.untis.importedAt && old.length && keep.length) {
+    // Nur den Zeitraum vergleichen, den beide Importe abdecken
+    const lo = Math.max(now, keep[0].start), hi = keep[keep.length - 1].start;
+    const keyed = arr => { const m = new Map(); for (const e of arr) { let i = 0; while (m.has(`${e.start}|${i}`)) i++; m.set(`${e.start}|${i}`, e); } return m; };
+    const o = keyed(old.filter(e => e.start >= lo && e.start <= hi)), n = keyed(keep.filter(e => e.start >= lo));
+    for (const [k, e] of n) {
+      const prev = o.get(k);
+      if (!prev) changes.push({ type: 'neu', ev: e });
+      else if (isCancelled(e) && !isCancelled(prev)) changes.push({ type: 'entfällt', ev: e });
+      else if (prev.summary !== e.summary || prev.location !== e.location) changes.push({ type: 'geändert', ev: e, before: prev });
+    }
+    for (const [k, e] of o) if (!n.has(k)) changes.push({ type: 'entfällt', ev: e });
+  }
+  // Ausfälle, die WebUntis selbst markiert
+  for (const e of keep) if (e.end >= now && isCancelled(e) && !changes.some(c => c.ev.start === e.start && c.ev.summary === e.summary)) changes.push({ type: 'entfällt', ev: e });
+  S.untis.events = keep;
+  S.untis.changes = changes.sort((a, b) => a.ev.start - b.ev.start).slice(0, 150);
+  S.untis.importedAt = now;
+  save();
+  return { count: keep.length, changes: changes.length };
+}
+async function refreshUntis(silent) {
+  const url = S.settings.untisUrl;
+  if (!url) { if (!silent) toast('Trage zuerst den Abo-Link ein'); return; }
+  try {
+    const r = await fetch(url.replace(/^webcal:/i, 'https:'), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const res = importUntis(await r.text()); render();
+    toast(`WebUntis: ${res.count} Stunden geladen, ${res.changes} Änderungen`);
+  } catch (e) {
+    if (!silent) toast('Direktabruf von WebUntis nicht möglich – bitte die iCal-Datei importieren');
+  }
+}
+function gridFromUntis() {
+  const evs = S.untis.events.filter(e => !isCancelled(e));
+  if (!evs.length) { toast('Noch keine WebUntis-Daten importiert'); return; }
+  const times = [...new Set(evs.map(e => fmtTime(e.start)))].sort();
+  const weeks = {};
+  evs.forEach(e => { const w = weekStart(isoDate(new Date(e.start))); (weeks[w] = weeks[w] || []).push(e); });
+  const best = Object.values(weeks).sort((a, b) => b.length - a.length)[0];
+  const slots = [], unmatched = new Set();
+  for (const e of best) {
+    const day = weekday(isoDate(new Date(e.start))); if (day > 4) continue;
+    const su = untisSubject(e); if (!su) { unmatched.add(e.summary); continue; }
+    const st = fmtTime(e.start), en = fmtTime(e.end);
+    times.forEach((t, i) => {
+      if ((t === st || (t > st && t < en)) && !slots.some(x => x.day === day && x.period === i + 1))
+        slots.push({ id: uid(), day, period: i + 1, subjectId: su.id, klasse: untisClass(e, su), room: e.location });
+    });
+  }
+  if (!slots.length) { toast('Keine Fächer erkannt – trage bei deinen Fächern das WebUntis-Kürzel ein'); return; }
+  if (S.timetable.length && !confirm(`Deinen Stundenplan durch ${slots.length} Stunden aus WebUntis ersetzen?`)) return;
+  S.timetable = slots; S.settings.periodTimes = times; S.settings.periods = Math.max(times.length, 1);
+  save(); render();
+  toast(unmatched.size ? `Übernommen. Nicht erkannt: ${[...unmatched].slice(0, 3).join(', ')}` : 'Stundenplan aus WebUntis übernommen');
+}
+
+// Termine einer Reihe aus WebUntis bzw. dem Stundenplan ableiten
 function scheduleUnit(u) {
-  const slots = S.timetable.filter(t => t.subjectId === u.subjectId &&
-    (!u.klasse || !t.klasse || t.klasse.trim().toLowerCase() === u.klasse.trim().toLowerCase()));
-  if (!slots.length) { toast('Keine passenden Stunden im Stundenplan gefunden'); return; }
   const open = u.lessons.filter(l => !l.date);
   if (!open.length) { toast('Alle Stunden haben bereits ein Datum'); return; }
   const lastDated = u.lessons.filter(l => l.date).map(l => l.date).sort().pop();
   let d = lastDated ? addDays(lastDated, 1) : (u.start || today());
-  let i = 0, guard = 0;
-  while (i < open.length && guard++ < 400) {
-    const wd = weekday(d);
-    const n = slots.filter(s => s.day === wd).length;
-    for (let k = 0; k < n && i < open.length; k++) open[i++].date = d;
+  const match = (sid, k) => sid === u.subjectId && (!u.klasse || !k || k.trim().toLowerCase() === u.klasse.trim().toLowerCase());
+  const dates = [];
+  const evs = S.untis.events;
+  if (evs.length) {
+    const untisEnd = isoDate(new Date(Math.max(...evs.map(e => e.start))));
+    evs.filter(e => !isCancelled(e)).forEach(e => {
+      const su = untisSubject(e), di = isoDate(new Date(e.start));
+      if (su && di >= d && match(su.id, untisClass(e, su))) dates.push(di);
+    });
+    if (untisEnd >= d) d = addDays(untisEnd, 1);
+  }
+  const slots = S.timetable.filter(t => match(t.subjectId, t.klasse));
+  let guard = 0;
+  while (dates.length < open.length && slots.length && guard++ < 400) {
+    // Doppelstunden (direkt aufeinanderfolgend) zählen als eine Stunde der Reihe
+    const per = slots.filter(x => x.day === weekday(d)).map(x => x.period).sort((x, y) => x - y);
+    const n = per.filter((v, i) => i === 0 || per[i - 1] !== v - 1).length;
+    for (let k = 0; k < n; k++) dates.push(d);
     d = addDays(d, 1);
   }
+  if (!dates.length) { toast('Keine passenden Stunden im Stundenplan oder in WebUntis gefunden'); return; }
+  dates.sort();
+  let i = 0; for (const l of open) { if (i >= dates.length) break; l.date = dates[i++]; }
   sortLessons(u); save(); render();
-  toast(`${open.length} Termine eingetragen – bitte Ferien & Feiertage prüfen`);
+  toast(`${i} Termine eingetragen${evs.length ? ' (inkl. WebUntis)' : ''} – bitte Ferien prüfen`);
+}
+
+// ====================================================================
+// Klassenleitung
+// ====================================================================
+function editClass(id) {
+  const c = id ? klass(id) : null;
+  openForm({
+    title: c ? 'Klasse bearbeiten' : 'Neue Klassenleitung',
+    values: c || { color: COLORS[(S.classes.length + 3) % COLORS.length] },
+    fields: [
+      { name: 'name', label: 'Klasse', required: true, placeholder: 'z. B. 7b' },
+      { name: 'year', label: 'Schuljahr', placeholder: 'z. B. 2026/27' },
+      { name: 'size', label: 'Anzahl Schüler:innen', type: 'number', min: 0, hint: 'Vorgabe für Rückläufe (z. B. Einverständniserklärungen)' },
+      { name: 'room', label: 'Klassenraum' },
+      { name: 'coTeacher', label: 'Co-Klassenleitung' },
+      { name: 'color', label: 'Farbe', type: 'color' },
+      { name: 'parentReps', label: 'Klassenpflegschaft / Elternvertretung', type: 'textarea', hint: 'Nur speichern, was du dienstlich auf dem Gerät verarbeiten darfst.' },
+      { name: 'notes', label: 'Notizen', type: 'textarea' },
+    ],
+    onSubmit: d => { if (c) Object.assign(c, d); else { const nc = { id: uid(), ...d }; S.classes.push(nc); location.hash = '#/klasse/' + nc.id; } },
+    onDelete: c && (async () => {
+      for (const m of S.materials.filter(m => m.classId === c.id && !m.subjectId && !m.projectId)) await deleteMaterialData(m);
+      S.materials.forEach(m => { if (m.classId === c.id) m.classId = ''; });
+      S.tasks = S.tasks.filter(t => t.classId !== c.id);
+      S.contacts = S.contacts.filter(x => x.classId !== c.id);
+      S.classEvents = S.classEvents.filter(x => x.classId !== c.id);
+      S.timeEntries.forEach(e => { if (e.classId === c.id) e.classId = ''; });
+      S.classes = S.classes.filter(x => x !== c);
+      location.hash = '#/klassen';
+    }),
+  });
+}
+function editContact(id, classId) {
+  const k = id ? byId(S.contacts, id) : null;
+  openForm({
+    title: k ? 'Elternkontakt bearbeiten' : 'Elternkontakt dokumentieren',
+    values: k || { date: today(), kind: 'Gespräch', classId: classId || '' },
+    intro: '<p class="small muted">Tipp: Statt vollständiger Namen Kürzel oder Initialen verwenden.</p>',
+    fields: [
+      { name: 'date', label: 'Datum', type: 'date', required: true },
+      { name: 'kind', label: 'Art', type: 'select', options: CONTACT_KINDS.map(x => ({ value: x, label: x })) },
+      { name: 'who', label: 'Mit wem / betrifft (Kürzel)', placeholder: 'z. B. Eltern von M. K.' },
+      { name: 'topic', label: 'Anlass / Thema', required: true },
+      { name: 'result', label: 'Ergebnis / Vereinbarungen', type: 'textarea', rows: 4 },
+      { name: 'followUp', label: 'Wiedervorlage am', type: 'date', hint: 'Legt automatisch eine Aufgabe an' },
+      { name: 'classId', label: 'Klasse', type: 'select', options: classOpts() },
+    ],
+    onSubmit: d => {
+      const prevFollow = k ? k.followUp : '';
+      const rec = k || { id: uid() };
+      Object.assign(rec, d); if (!k) S.contacts.push(rec);
+      if (d.followUp && d.followUp !== prevFollow) S.tasks.push({ id: uid(), createdAt: Date.now(), title: `Wiedervorlage: ${d.topic}${d.who ? ' (' + d.who + ')' : ''}`, due: d.followUp, classId: d.classId, subjectId: '', projectId: '', done: false, priority: false });
+    },
+    onDelete: k && (() => { S.contacts = S.contacts.filter(x => x !== k); }),
+  });
+}
+function editClassEvent(id, classId) {
+  const ev = id ? byId(S.classEvents, id) : null;
+  openForm({
+    title: ev ? 'Termin bearbeiten' : 'Neuer Termin',
+    values: ev || { classId: classId || '', date: today() },
+    fields: [
+      { name: 'title', label: 'Termin', required: true, placeholder: 'z. B. Elternabend, Elternsprechtag, Zeugniskonferenz, Wandertag' },
+      { name: 'date', label: 'Datum', type: 'date', required: true },
+      { name: 'time', label: 'Uhrzeit', type: 'time' },
+      { name: 'place', label: 'Ort' },
+      { name: 'note', label: 'Notiz / Tagesordnung', type: 'textarea' },
+      { name: 'classId', label: 'Klasse', type: 'select', options: classOpts() },
+    ],
+    onSubmit: d => { if (ev) Object.assign(ev, d); else S.classEvents.push({ id: uid(), ...d }); },
+    onDelete: ev && (() => { S.classEvents = S.classEvents.filter(x => x !== ev); }),
+  });
+}
+const hasReturn = m => Number(m.returnTotal) > 0;
+const returnOpen = m => hasReturn(m) && (Number(m.returnCount) || 0) < Number(m.returnTotal);
+function returnWidget(m) {
+  if (!hasReturn(m)) return '';
+  const n = Number(m.returnCount) || 0, t = Number(m.returnTotal);
+  return `<div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+    <button class="btn sm" data-act="retStep" data-id="${m.id}" data-d="-1" aria-label="Einen weniger">−</button>
+    <div style="flex:1;min-width:80px">${bar(n / t, n >= t ? 'var(--ok)' : 'var(--warn)')}</div>
+    <strong class="small" style="min-width:52px;text-align:center">${n}/${t}</strong>
+    <button class="btn sm" data-act="retStep" data-id="${m.id}" data-d="1" aria-label="Einen mehr">+</button></div>`;
 }
 
 function duplicateUnit(u) {
@@ -479,12 +698,12 @@ function duplicateUnit(u) {
 // Ansichten
 // ====================================================================
 const V = {};
-let ui = { week: weekStart(today()), taskFilter: 'offen' };
+let ui = { week: weekStart(today()), untisWeek: weekStart(today()), taskFilter: 'offen' };
 
 function timerCard() {
   const t = S.timer;
   if (t) {
-    const label = [t.category, subj(t.subjectId)?.name, proj(t.projectId)?.name].filter(Boolean).join(' · ');
+    const label = [t.category, subj(t.subjectId)?.name, proj(t.projectId)?.name, t.classId && klass(t.classId) && 'Klasse ' + klass(t.classId).name].filter(Boolean).join(' · ');
     return `<section class="card timer-card running">
       <div class="card-head"><h2>⏱️ Zeiterfassung läuft</h2></div>
       <div class="timer-clock" data-timer>${fmtClock(Date.now() - t.start)}</div>
@@ -498,16 +717,55 @@ function timerCard() {
       <option value="">Fach / Projekt (optional)</option>
       ${S.subjects.map(s => `<option value="s:${s.id}">${esc(s.name)}</option>`).join('')}
       ${S.projects.filter(p => p.status !== 'abgeschlossen').map(p => `<option value="p:${p.id}">${esc(p.name)}</option>`).join('')}
+      ${S.classes.map(c => `<option value="k:${c.id}">Klasse ${esc(c.name)}</option>`).join('')}
     </select></div>
     <div class="quick-cats">${CATS.map((c, i) => `<button class="chip" style="min-height:38px;padding:0 14px" data-act="startTimer" data-cat="${esc(c)}"><span class="dot" style="--c:${CAT_COLORS[i]}"></span>${esc(c)}</button>`).join('')}</div>
   </section>`;
+}
+
+function lessonLine(su, klasse, nx) {
+  return nx ? `<a href="#/reihe/${nx.u.id}">${esc(nx.l.title)}</a>` : (su ? 'Keine Reihe geplant' : '');
+}
+function todayLessonsCard(t, wd) {
+  const evs = untisDay(t);
+  const chg = futureChanges();
+  const head = `<div class="card-head"><h2>📅 Heute im Unterricht</h2><a href="#/stundenplan" class="small">${evs.length ? 'WebUntis' : 'Stundenplan'}</a></div>`;
+  const changeNote = chg.length ? `<a class="notice warn small" href="#/stundenplan" style="display:block;margin-top:10px;text-decoration:none;color:inherit">⚠️ <strong>${chg.length} Änderung${chg.length === 1 ? '' : 'en'}</strong> im WebUntis-Plan, z. B. ${esc(fmtDateShort(isoDate(new Date(chg[0].ev.start))))} ${fmtTime(chg[0].ev.start)}: ${esc(chg[0].ev.summary)} (${esc(chg[0].type)})</a>` : '';
+  let body;
+  if (evs.length) {
+    body = `<ul class="list">${evs.map(e => {
+      const su = untisSubject(e), k = untisClass(e, su), nx = su && !isCancelled(e) ? nextLessonFor(su.id, k) : null;
+      const c = untisChangeFor(e); const canc = isCancelled(e) || (c && c.type === 'entfällt');
+      return `<li class="${canc ? 'done' : ''}"><strong style="width:46px" class="small">${fmtTime(e.start)}</strong>${subjectDot(su)}<div class="grow">
+        <div class="title">${esc(e.summary)}</div><div class="meta">${e.location ? 'Raum ' + esc(e.location) + ' · ' : ''}${lessonLine(su, k, nx)}</div></div>
+        ${canc ? '<span class="chip bad">Entfällt</span>' : c ? `<span class="chip warn">${c.type === 'neu' ? 'Neu' : 'Geändert'}</span>` : nx ? statusChip(lessonStatus(nx.l)) : ''}</li>`;
+    }).join('')}</ul>`;
+  } else {
+    const slots = wd < 5 ? S.timetable.filter(x => x.day === wd).sort((a, b) => a.period - b.period) : [];
+    body = slots.length ? `<ul class="list">${slots.map(x => {
+      const su = subj(x.subjectId); const nx = nextLessonFor(x.subjectId, x.klasse);
+      return `<li><strong style="width:28px">${x.period}.</strong>${subjectDot(su)}<div class="grow">
+        <div class="title">${esc(su?.name)} ${x.klasse ? '· ' + esc(x.klasse) : ''}</div>
+        <div class="meta">${x.room ? 'Raum ' + esc(x.room) + ' · ' : ''}${lessonLine(su, x.klasse, nx)}</div></div>
+        ${nx ? statusChip(lessonStatus(nx.l)) : ''}</li>`;
+    }).join('')}</ul>` : `<p class="empty">${wd >= 5 ? 'Wochenende – genieß die freie Zeit! ☀️' : S.timetable.length || S.untis.importedAt ? 'Heute hast du keinen Unterricht.' : 'Importiere deinen Stundenplan aus WebUntis, dann erscheinen hier deine Stunden.'}</p>`;
+  }
+  return `<section class="card">${head}${body}${changeNote}</section>`;
+}
+function classesTodayCard(t) {
+  if (!S.classes.length) return '';
+  const evs = S.classEvents.filter(e => e.date >= t && e.date <= addDays(t, 21)).sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+  const rets = S.materials.filter(m => m.classId && returnOpen(m));
+  return `<section class="card"><div class="card-head"><h2>👪 Klassenleitung</h2><a href="#/klassen" class="small">Öffnen</a></div>
+    ${evs.length ? `<h3>Termine (3 Wochen)</h3><ul class="list">${evs.slice(0, 5).map(e => `<li><span class="chip accent">${fmtDateShort(e.date)}</span><div class="grow"><a class="title" href="#/klasse/${e.classId}">${esc(e.title)}</a><div class="meta">${[e.time && e.time + ' Uhr', klass(e.classId) && 'Klasse ' + klass(e.classId).name].filter(Boolean).map(esc).join(' · ')}</div></div></li>`).join('')}</ul>` : ''}
+    ${rets.length ? `<h3 style="margin-top:10px">Offene Rückläufe</h3><ul class="list">${rets.map(m => `<li><div class="grow"><a class="title" href="#/klasse/${m.classId}">${esc(m.title)}</a><div class="meta">Klasse ${esc(klass(m.classId)?.name)}</div></div><span class="chip warn">${Number(m.returnCount) || 0}/${m.returnTotal}</span></li>`).join('')}</ul>` : ''}
+    ${!evs.length && !rets.length ? '<p class="empty">Keine anstehenden Termine oder offenen Rückläufe.</p>' : ''}</section>`;
 }
 
 V.heute = () => {
   const t = today(), wd = weekday(t);
   const hour = new Date().getHours();
   const greet = hour < 11 ? 'Guten Morgen' : hour < 18 ? 'Hallo' : 'Guten Abend';
-  const slots = wd < 5 ? S.timetable.filter(s => s.day === wd).sort((a, b) => a.period - b.period) : [];
   const ot = openTasks();
   const overdue = ot.filter(x => x.due && x.due < t);
   const soon = ot.filter(x => x.due && x.due >= t && x.due <= addDays(t, 7)).sort((a, b) => a.due.localeCompare(b.due));
@@ -526,16 +784,8 @@ V.heute = () => {
       <p>Lege zuerst deine <a href="#/faecher">Fächer</a> an und trage deinen <a href="#/stundenplan">Stundenplan</a> ein. Danach siehst du hier jeden Tag deine Stunden, fehlendes Material, fällige Aufgaben und deine Arbeitszeit.</p>
       <div class="actions" style="margin-top:10px"><button class="btn primary" data-act="newSubject">+ Erstes Fach anlegen</button><button class="btn" data-act="loadDemo">Beispieldaten ansehen</button></div></div>` : ''}
     <div class="grid grid-2">
-      <section class="card">
-        <div class="card-head"><h2>📅 Heute im Unterricht</h2><a href="#/stundenplan" class="small">Stundenplan</a></div>
-        ${slots.length ? `<ul class="list">${slots.map(s => {
-          const su = subj(s.subjectId); const nx = nextLessonFor(s.subjectId, s.klasse);
-          return `<li><strong style="width:28px">${s.period}.</strong>${subjectDot(su)}<div class="grow">
-            <div class="title">${esc(su?.name)} ${s.klasse ? '· ' + esc(s.klasse) : ''}</div>
-            <div class="meta">${s.room ? 'Raum ' + esc(s.room) + ' · ' : ''}${nx ? `<a href="#/reihe/${nx.u.id}">${esc(nx.l.title)}</a>` : 'Keine Reihe geplant'}</div></div>
-            ${nx ? statusChip(lessonStatus(nx.l)) : ''}</li>`;
-        }).join('')}</ul>` : `<p class="empty">${wd >= 5 ? 'Wochenende – genieß die freie Zeit! ☀️' : S.timetable.length ? 'Heute hast du keinen Unterricht.' : 'Trage deinen Stundenplan ein, dann erscheinen hier deine Stunden.'}</p>`}
-      </section>
+      ${todayLessonsCard(t, wd)}
+      ${classesTodayCard(t)}
       ${timerCard()}
       <section class="card">
         <div class="card-head"><h2>✅ Aufgaben</h2><a href="#/aufgaben" class="small">Alle (${ot.length})</a></div>
@@ -564,25 +814,117 @@ V.heute = () => {
 
 function taskRow(x) {
   const t = today();
-  const su = subj(x.subjectId), pr = proj(x.projectId);
+  const su = subj(x.subjectId), pr = proj(x.projectId), kl = klass(x.classId);
   const dueCls = x.done ? '' : x.due && x.due < t ? 'bad' : x.due === t ? 'warn' : '';
   return `<li class="${x.done ? 'done' : ''}"><input type="checkbox" data-chg="taskDone" data-id="${x.id}" ${x.done ? 'checked' : ''} aria-label="Erledigt">
     <div class="grow clickable" data-act="editTask" data-id="${x.id}"><div class="title">${x.priority ? '❗ ' : ''}${esc(x.title)}</div>
-    <div class="meta">${[su && su.name, pr && pr.name].filter(Boolean).map(esc).join(' · ')}</div></div>
+    <div class="meta">${[su && su.name, pr && pr.name, kl && 'Klasse ' + kl.name].filter(Boolean).map(esc).join(' · ')}</div></div>
     ${x.due ? `<span class="chip ${dueCls}">${x.due === t ? 'Heute' : x.due === addDays(t, 1) ? 'Morgen' : fmtDateShort(x.due)}</span>` : ''}</li>`;
 }
 
 V.stundenplan = () => {
   const n = S.settings.periods || 8; const wdToday = weekday(today());
+  const times = S.settings.periodTimes || [];
+  const u = S.untis; const ws = ui.untisWeek;
+  const chg = futureChanges();
+  const weekDays = Array.from({ length: 5 }, (_, i) => addDays(ws, i));
+  const hasWeek = u.events.some(e => e.start >= parseIso(ws).getTime() && e.start < parseIso(addDays(ws, 7)).getTime());
   return `<div class="page">
-    <div class="page-head"><div><h1>Stundenplan</h1><div class="sub">Tippe auf ein Feld, um eine Stunde einzutragen. Daraus werden Termine für deine Reihen berechnet.</div></div></div>
-    <div class="card" style="overflow-x:auto"><table class="tt"><thead><tr><th class="per"></th>${DAYS.map((d, i) => `<th>${i === wdToday ? '● ' : ''}${d}</th>`).join('')}</tr></thead><tbody>
-    ${Array.from({ length: n }, (_, p) => `<tr><th class="per">${p + 1}.</th>${DAYS.map((_, d) => {
-      const s = S.timetable.find(t => t.day === d && t.period === p + 1); const su = s && subj(s.subjectId);
+    <div class="page-head"><div><h1>Stundenplan</h1><div class="sub">Aus WebUntis importieren oder selbst eintragen. Daraus berechnet der Assistent die Termine deiner Reihen.</div></div>
+      <div class="actions">${S.settings.untisWebUrl ? `<button class="btn" data-act="openUrl" data-url="${esc(S.settings.untisWebUrl)}">WebUntis öffnen ↗</button>` : ''}</div></div>
+    <div class="grid grid-2" style="margin-bottom:16px">
+      <section class="card"><div class="card-head"><h2>🔄 WebUntis</h2>${u.importedAt ? `<span class="chip ok">Stand: ${fmtDateShort(isoDate(new Date(u.importedAt)))} ${fmtTime(u.importedAt)}</span>` : '<span class="chip">Noch nicht importiert</span>'}</div>
+        <div class="actions"><label class="btn primary">iCal-Datei importieren<input type="file" accept=".ics,text/calendar" data-chg="importIcs" hidden></label>
+          ${S.settings.untisUrl ? '<button class="btn" data-act="refreshUntis">Über Abo-Link aktualisieren</button>' : ''}
+          ${u.events.length ? '<button class="btn" data-act="gridFromUntis">Als Wochenraster übernehmen</button>' : ''}</div>
+        <details style="margin-top:12px"><summary class="small"><strong>So bekommst du die Datei aus WebUntis</strong></summary>
+          <ol class="small muted" style="padding-left:18px;margin:8px 0 0">
+            <li>WebUntis in Safari öffnen (nicht in der Untis-App) und anmelden.</li>
+            <li>Deinen Stundenplan öffnen und über das Export-/Teilen-Symbol <em>iCal</em> wählen. Je nach Schule gibt es im Profil unter <em>Freigaben</em> auch einen Abo-Link.</li>
+            <li>Wenn Safari fragt, die Datei in der <em>Dateien</em>-App sichern (nicht zum Kalender hinzufügen). Dann hier „iCal-Datei importieren“ antippen.</li>
+            <li>Nach jedem neuen Import zeigt dir der Assistent, was sich geändert hat: Ausfall, Vertretung, Raumwechsel.</li>
+          </ol></details>
+        <form class="grid" data-form="untis" style="gap:10px;margin-top:12px">
+          ${fieldHtml({ name: 'untisWebUrl', label: 'Adresse von WebUntis deiner Schule', type: 'url', placeholder: 'https://….webuntis.com/WebUntis/?school=…' }, S.settings.untisWebUrl)}
+          ${fieldHtml({ name: 'untisUrl', label: 'iCal-Abo-Link (optional)', type: 'url', placeholder: 'https://… oder webcal://…', hint: 'Falls eure Schule das erlaubt. Viele WebUntis-Server lassen einen Direktabruf aus dem Browser nicht zu, dann bitte die Datei importieren.' }, S.settings.untisUrl)}
+          <div><button class="btn sm">Speichern</button></div></form>
+      </section>
+      <section class="card"><div class="card-head"><h2>⚠️ Änderungen</h2></div>
+        ${chg.length ? `<ul class="list">${chg.map(c => `<li><span class="chip ${c.type === 'entfällt' ? 'bad' : c.type === 'neu' ? 'accent' : 'warn'}">${esc(c.type)}</span><div class="grow">
+          <div class="title">${fmtDateShort(isoDate(new Date(c.ev.start)))} ${fmtTime(c.ev.start)} · ${esc(c.ev.summary)}</div>
+          <div class="meta">${c.before && c.before.summary !== c.ev.summary ? `vorher: ${esc(c.before.summary)} · ` : ''}${c.before && c.before.location !== c.ev.location ? `Raum ${esc(c.before.location || '–')} → ${esc(c.ev.location || '–')}` : c.ev.location ? 'Raum ' + esc(c.ev.location) : ''}</div></div></li>`).join('')}</ul>
+          <button class="btn sm" data-act="clearChanges" style="margin-top:8px">Als gelesen markieren</button>`
+          : `<p class="empty">${u.importedAt ? 'Keine Änderungen seit dem letzten Import.' : 'Nach dem zweiten Import siehst du hier, was sich geändert hat.'}</p>`}
+      </section>
+    </div>
+    ${u.events.length ? `<section class="card" style="margin-bottom:16px"><div class="card-head"><h2>WebUntis: KW ${kw(ws)}</h2>
+      <div class="week-nav"><button class="btn sm" data-act="untisWeek" data-d="-7" aria-label="Vorige Woche">‹</button><button class="btn sm" data-act="untisWeek" data-d="0">Heute</button><button class="btn sm" data-act="untisWeek" data-d="7" aria-label="Nächste Woche">›</button></div></div>
+      ${hasWeek ? `<div class="grid" style="grid-template-columns:repeat(5,minmax(0,1fr));gap:8px">${weekDays.map(d => `<div><h3 class="small ${d === today() ? '' : 'muted'}">${fmtDateShort(d)}</h3>${untisDay(d).map(e => {
+        const su = untisSubject(e), c = untisChangeFor(e), canc = isCancelled(e) || (c && c.type === 'entfällt');
+        return `<div class="slot filled" style="--c:${esc(su?.color || '#94a3b8')};margin-bottom:6px;height:auto;cursor:default;${canc ? 'opacity:.5;text-decoration:line-through' : ''}">
+          <span class="s-meta">${fmtTime(e.start)}${c && !canc ? ' · ⚠️' : ''}</span><span class="s-name">${esc(e.summary)}</span><span class="s-meta">${esc(e.location)}</span></div>`;
+      }).join('') || '<p class="muted small">–</p>'}</div>`).join('')}</div>` : '<p class="empty">Für diese Woche sind keine WebUntis-Daten importiert.</p>'}
+    </section>` : ''}
+    <section class="card" style="overflow-x:auto"><div class="card-head"><h2>Wochenraster</h2><span class="small muted">Tippe auf ein Feld zum Bearbeiten</span></div>
+    <table class="tt"><thead><tr><th class="per"></th>${DAYS.map((d, i) => `<th>${i === wdToday ? '● ' : ''}${d}</th>`).join('')}</tr></thead><tbody>
+    ${Array.from({ length: n }, (_, p) => `<tr><th class="per">${p + 1}.${times[p] ? `<br><span class="small" style="font-weight:400">${esc(times[p])}</span>` : ''}</th>${DAYS.map((_, d) => {
+      const x = S.timetable.find(t => t.day === d && t.period === p + 1); const su = x && subj(x.subjectId);
       return `<td><button class="slot ${su ? 'filled' : ''} ${d === wdToday && su ? 'today' : ''}" style="--c:${esc(su?.color || '')}" data-act="editSlot" data-day="${d}" data-period="${p + 1}">
-        ${su ? `<span class="s-name">${esc(su.name)}</span><span class="s-meta">${esc([s.klasse, s.room].filter(Boolean).join(' · '))}</span>` : '<span class="s-meta">+</span>'}</button></td>`;
+        ${su ? `<span class="s-name">${esc(su.name)}</span><span class="s-meta">${esc([x.klasse, x.room].filter(Boolean).join(' · '))}</span>` : '<span class="s-meta">+</span>'}</button></td>`;
     }).join('')}</tr>`).join('')}
-    </tbody></table></div></div>`;
+    </tbody></table></section></div>`;
+};
+
+V.klassen = () => `<div class="page">
+  <div class="page-head"><div><h1>Klassenleitung</h1><div class="sub">Elternarbeit, Dokumente mit Rücklauf, Termine und To-dos</div></div>
+    <div class="actions"><button class="btn primary" data-act="newClass">+ Klasse</button></div></div>
+  ${S.classes.length ? `<div class="cards">${S.classes.map(c => {
+    const open = S.tasks.filter(t => t.classId === c.id && !t.done).length;
+    const rets = S.materials.filter(m => m.classId === c.id && returnOpen(m)).length;
+    const next = S.classEvents.filter(e => e.classId === c.id && e.date >= today()).sort((a, b) => a.date.localeCompare(b.date))[0];
+    return `<a class="card subject-card" style="--c:${esc(c.color)}" href="#/klasse/${c.id}"><h2 style="margin-bottom:2px">Klasse ${esc(c.name)}</h2>
+      <p class="muted small">${esc([c.year, c.size && c.size + ' Schüler:innen', c.room && 'Raum ' + c.room].filter(Boolean).join(' · '))}</p>
+      <div class="chips" style="margin-top:10px"><span class="chip">${open} To-dos</span><span class="chip ${rets ? 'warn' : 'ok'}">${rets} offene Rückläufe</span></div>
+      ${next ? `<p class="small" style="margin-top:8px">Nächster Termin: <strong>${esc(next.title)}</strong>, ${fmtDateShort(next.date)}</p>` : ''}</a>`;
+  }).join('')}</div>` : `<div class="card"><p class="empty">Noch keine Klassenleitung angelegt.</p><button class="btn primary" data-act="newClass">+ Klasse anlegen</button></div>`}
+  <div class="notice warn small" style="margin-top:16px"><strong>Datenschutz:</strong> In NRW regelt die VO-DV I, welche Schülerdaten auf privaten Geräten verarbeitet werden dürfen. Dafür ist eine Genehmigung der Schulleitung nötig. Nutze möglichst Kürzel statt Namen und keine sensiblen Daten wie Gesundheit oder Förderbedarf.</div>
+</div>`;
+
+V.klasse = id => {
+  const c = klass(id); if (!c) return notFound();
+  const t = today();
+  const tasks = S.tasks.filter(x => x.classId === id).sort((a, b) => (a.done - b.done) || (a.due || '9').localeCompare(b.due || '9'));
+  const docs = S.materials.filter(m => m.classId === id).sort((a, b) => (returnOpen(b) - returnOpen(a)) || a.title.localeCompare(b.title));
+  const contacts = S.contacts.filter(k => k.classId === id).sort((a, b) => b.date.localeCompare(a.date));
+  const events = S.classEvents.filter(e => e.classId === id).sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+  const upcoming = events.filter(e => e.date >= t), past = events.filter(e => e.date < t).reverse();
+  const ms = S.timeEntries.filter(e => e.classId === id).reduce((a, e) => a + e.end - e.start, 0);
+  const evRow = e => `<li class="clickable" data-act="editClassEvent" data-id="${e.id}"><span class="chip accent">${fmtDateShort(e.date)}</span><div class="grow"><div class="title">${esc(e.title)}</div><div class="meta">${esc([e.time && e.time + ' Uhr', e.place].filter(Boolean).join(' · '))}</div></div></li>`;
+  return `<div class="page">
+    <div class="crumbs"><a href="#/klassen">← Klassenleitung</a></div>
+    <div class="page-head"><div><h1><span class="dot" style="--c:${esc(c.color)}"></span> Klasse ${esc(c.name)}</h1>
+      <div class="sub">${esc([c.year, c.size && c.size + ' Schüler:innen', c.room && 'Raum ' + c.room, c.coTeacher && 'mit ' + c.coTeacher].filter(Boolean).join(' · '))}</div></div>
+      <div class="actions"><button class="btn" data-act="startClassTimer" data-id="${id}">⏱️ Elternarbeit erfassen</button><button class="btn" data-act="editClass" data-id="${id}">Bearbeiten</button></div></div>
+    <div class="grid grid-2">
+      <section class="card"><div class="card-head"><h2>📅 Termine</h2><button class="btn sm" data-act="newClassEvent" data-class="${id}">+ Termin</button></div>
+        ${upcoming.length ? `<ul class="list">${upcoming.map(evRow).join('')}</ul>` : '<p class="empty">Keine anstehenden Termine, z. B. Elternabend, Elternsprechtag, Zeugniskonferenz.</p>'}
+        ${past.length ? `<details style="margin-top:8px"><summary class="small muted">Vergangene Termine (${past.length})</summary><ul class="list">${past.map(evRow).join('')}</ul></details>` : ''}</section>
+      <section class="card"><div class="card-head"><h2>✅ To-dos</h2><button class="btn sm" data-act="newTask" data-class="${id}">+ Aufgabe</button></div>
+        ${tasks.length ? `<ul class="list">${tasks.map(taskRow).join('')}</ul>` : '<p class="empty">Keine Aufgaben.</p>'}</section>
+      <section class="card"><div class="card-head"><h2>📄 Dokumente & Rückläufe</h2><button class="btn sm" data-act="newMaterial" data-class="${id}">+ Dokument</button></div>
+        ${docs.length ? `<ul class="list">${docs.map(m => `<li style="display:block"><div style="display:flex;align-items:center;gap:12px"><span style="font-size:1.2rem">${matIcon(m)}</span>
+          <div class="grow clickable" data-act="openMat" data-id="${m.id}"><div class="title">${esc(m.title)}</div>${m.note ? `<div class="meta">${esc(m.note)}</div>` : ''}</div>
+          ${hasReturn(m) ? (returnOpen(m) ? '<span class="chip warn">Rücklauf offen</span>' : '<span class="chip ok">Vollständig</span>') : ''}
+          <button class="icon-btn" data-act="editMaterial" data-id="${m.id}" aria-label="Bearbeiten">✎</button></div>${returnWidget(m)}</li>`).join('')}</ul>`
+          : '<p class="empty">Elternbriefe, Einverständniserklärungen, Klassenfahrt-Infos, Protokolle …</p>'}</section>
+      <section class="card"><div class="card-head"><h2>💬 Elternkontakte</h2><button class="btn sm" data-act="newContact" data-class="${id}">+ Kontakt</button></div>
+        ${contacts.length ? `<ul class="list">${contacts.map(k => `<li class="clickable" data-act="editContact" data-id="${k.id}"><span class="chip">${fmtDateShort(k.date)}</span><div class="grow">
+          <div class="title">${esc(k.topic)}</div><div class="meta">${esc([k.kind, k.who].filter(Boolean).join(' · '))}${k.followUp ? ` · Wiedervorlage ${fmtDateShort(k.followUp)}` : ''}</div>
+          ${k.result ? `<div class="small" style="white-space:pre-wrap;margin-top:2px">${esc(k.result)}</div>` : ''}</div></li>`).join('')}</ul>`
+          : '<p class="empty">Gespräche, Telefonate und Elternbriefe dokumentieren.</p>'}
+        <p class="muted small" style="margin-top:8px">Zeit für Elternarbeit in dieser Klasse: <strong>${fmtDur(ms)}</strong></p></section>
+      ${c.parentReps || c.notes ? `<section class="card span-2">${c.parentReps ? `<h2>Klassenpflegschaft</h2><p style="white-space:pre-wrap">${esc(c.parentReps)}</p>` : ''}${c.notes ? `<h2 style="margin-top:12px">Notizen</h2><p style="white-space:pre-wrap">${esc(c.notes)}</p>` : ''}</section>` : ''}
+    </div></div>`;
 };
 
 V.faecher = () => `<div class="page">
@@ -763,7 +1105,7 @@ V.zeit = () => {
           return `<h3 style="margin-top:12px">${fmtDateShort(d)} <span class="muted">· ${fmtDur(es.reduce((a, e) => a + e.end - e.start, 0))}</span></h3><ul class="list">${es.map(e => {
             const ci = CATS.indexOf(e.category);
             return `<li class="clickable" data-act="editEntry" data-id="${e.id}"><span class="dot" style="--c:${CAT_COLORS[ci] || '#999'}"></span><div class="grow"><div class="title">${esc(e.category)}</div>
-              <div class="meta">${fmtTime(e.start)}–${fmtTime(e.end)} ${[subj(e.subjectId)?.name, proj(e.projectId)?.name, e.note].filter(Boolean).map(x => '· ' + esc(x)).join(' ')}</div></div><strong>${fmtDur(e.end - e.start)}</strong></li>`;
+              <div class="meta">${fmtTime(e.start)}–${fmtTime(e.end)} ${[subj(e.subjectId)?.name, proj(e.projectId)?.name, e.classId && klass(e.classId) && 'Klasse ' + klass(e.classId).name, e.note].filter(Boolean).map(x => '· ' + esc(x)).join(' ')}</div></div><strong>${fmtDur(e.end - e.start)}</strong></li>`;
           }).join('')}</ul>`;
         }).join('') || '<p class="empty">Keine Einträge.</p>'}</section>
     </div></div>`;
@@ -798,7 +1140,7 @@ const notFound = () => `<div class="page"><div class="card"><p>Nicht gefunden.</
 // ====================================================================
 // Render & Routing
 // ====================================================================
-const NAV_OF = { fach: 'faecher', reihe: 'faecher', projekt: 'projekte' };
+const NAV_OF = { fach: 'faecher', reihe: 'faecher', projekt: 'projekte', klasse: 'klassen' };
 let lastRoute = '';
 function render() {
   const h = location.hash.replace(/^#\/?/, '') || 'heute';
@@ -828,15 +1170,15 @@ setInterval(() => {
 // ====================================================================
 // Aktionen
 // ====================================================================
-function startTimer(category, subjectId = '', projectId = '') {
+function startTimer(category, subjectId = '', projectId = '', classId = '') {
   if (S.timer) stopTimer(true);
-  S.timer = { start: Date.now(), category, subjectId, projectId };
+  S.timer = { start: Date.now(), category, subjectId, projectId, classId };
   save(); render(); toast(`Zeiterfassung gestartet: ${category}`);
 }
 function stopTimer(silent) {
   const t = S.timer; if (!t) return;
   const end = Date.now();
-  if (end - t.start >= 60000) S.timeEntries.push({ id: uid(), start: t.start, end, category: t.category, subjectId: t.subjectId || '', projectId: t.projectId || '', note: '' });
+  if (end - t.start >= 60000) S.timeEntries.push({ id: uid(), start: t.start, end, category: t.category, subjectId: t.subjectId || '', projectId: t.projectId || '', classId: t.classId || '', note: '' });
   else if (!silent) toast('Weniger als 1 Minute – nicht gespeichert');
   S.timer = null; save();
   if (!silent) { render(); if (end - t.start >= 60000) toast(`${fmtDur(end - t.start)} gespeichert`); }
@@ -866,18 +1208,30 @@ const ACT = {
   editLesson: d => editLesson(d.unit, d.id),
   scheduleUnit: d => scheduleUnit(byId(S.units, d.id)),
   duplicateUnit: d => duplicateUnit(byId(S.units, d.id)),
-  newMaterial: d => editMaterial(null, { subjectId: d.subject, projectId: d.project, unitId: d.unit, lessonId: d.lesson }),
+  newMaterial: d => editMaterial(null, { subjectId: d.subject, projectId: d.project, classId: d.class, unitId: d.unit, lessonId: d.lesson }),
   editMaterial: d => editMaterial(d.id),
   openMat: d => openMaterial(d.id),
-  newTask: d => editTask(null, { subjectId: d.subject, projectId: d.project }),
+  newTask: d => editTask(null, { subjectId: d.subject, projectId: d.project, classId: d.class }),
   editTask: d => editTask(d.id),
   taskFilter: d => { ui.taskFilter = d.f; render(); },
+  newClass: () => editClass(),
+  editClass: d => editClass(d.id),
+  newContact: d => editContact(null, d.class),
+  editContact: d => editContact(d.id),
+  newClassEvent: d => editClassEvent(null, d.class),
+  editClassEvent: d => editClassEvent(d.id),
+  retStep: d => { const m = byId(S.materials, d.id); m.returnCount = Math.min(Number(m.returnTotal), Math.max(0, (Number(m.returnCount) || 0) + Number(d.d))); save(); render(); },
+  startClassTimer: d => startTimer('Elternarbeit', '', '', d.id),
+  refreshUntis: () => refreshUntis(),
+  gridFromUntis: () => gridFromUntis(),
+  clearChanges: () => { S.untis.changes = []; save(); render(); },
+  untisWeek: d => { ui.untisWeek = Number(d.d) === 0 ? weekStart(today()) : addDays(ui.untisWeek, Number(d.d)); render(); },
   newProject: () => editProject(),
   editProject: d => editProject(d.id),
   editSlot: d => editSlot(Number(d.day), Number(d.period)),
   startTimer: d => {
     const sel = ($('#timerSubject') || {}).value || '';
-    startTimer(d.cat, sel.startsWith('s:') ? sel.slice(2) : '', sel.startsWith('p:') ? sel.slice(2) : '');
+    startTimer(d.cat, sel.startsWith('s:') ? sel.slice(2) : '', sel.startsWith('p:') ? sel.slice(2) : '', sel.startsWith('k:') ? sel.slice(2) : '');
   },
   startProjectTimer: d => startTimer('Projekte', '', d.id),
   stopTimer: () => stopTimer(),
@@ -888,10 +1242,10 @@ const ACT = {
   exportCsv: () => {
     const num = ms => (ms / 3600e3).toFixed(2).replace('.', ',');
     const q = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
-    const rows = [['Datum', 'Beginn', 'Ende', 'Dauer (h)', 'Tätigkeit', 'Fach', 'Projekt', 'Notiz'].join(';')];
+    const rows = [['Datum', 'Beginn', 'Ende', 'Dauer (h)', 'Tätigkeit', 'Fach', 'Projekt', 'Klasse', 'Notiz'].join(';')];
     [...S.timeEntries].sort((a, b) => a.start - b.start).forEach(e => rows.push([
       fmtDate(isoDate(new Date(e.start))), fmtTime(e.start), fmtTime(e.end), num(e.end - e.start),
-      q(e.category), q(subj(e.subjectId)?.name), q(proj(e.projectId)?.name), q(e.note)].join(';')));
+      q(e.category), q(subj(e.subjectId)?.name), q(proj(e.projectId)?.name), q(klass(e.classId)?.name), q(e.note)].join(';')));
     download(`arbeitszeit-${today()}.csv`, '﻿' + rows.join('\r\n'), 'text/csv;charset=utf-8');
   },
   exportBackup: async () => {
@@ -917,6 +1271,12 @@ const ACT = {
 const CHG = {
   taskDone: (d, el) => { const t = byId(S.tasks, d.id); t.done = el.checked; t.doneAt = el.checked ? Date.now() : null; save(); setTimeout(render, 250); },
   lessonDone: (d, el) => { const l = byId(byId(S.units, d.unit).lessons, d.id); l.done = el.checked; save(); render(); },
+  importIcs: async (d, el) => {
+    const file = el.files[0]; if (!file) return;
+    try { const r = importUntis(await file.text()); render(); toast(`${r.count} Stunden importiert${r.changes ? ', ' + r.changes + ' Änderungen' : ''}`); }
+    catch (e) { toast('Import fehlgeschlagen: ' + e.message); }
+    el.value = '';
+  },
   projectNotes: (d, el) => { proj(d.id).notes = el.value; save(); toast('Notizen gespeichert'); },
   importBackup: async (d, el) => {
     const file = el.files[0]; if (!file) return;
@@ -957,6 +1317,10 @@ document.addEventListener('submit', e => {
     S.tasks.push({ id: uid(), createdAt: Date.now(), title, due: fe.namedItem('due') ? fe.namedItem('due').value : '', done: false, subjectId: '', projectId: '' });
     save(); render(); toast('Aufgabe hinzugefügt');
     const inp = $('[data-form="quickTask"] input[name="title"]'); if (inp) inp.focus();
+  } else if (form.dataset.form === 'untis') {
+    S.settings.untisWebUrl = form.elements.namedItem('untisWebUrl').value.trim();
+    S.settings.untisUrl = form.elements.namedItem('untisUrl').value.trim();
+    save(); render(); toast('Gespeichert');
   } else if (form.dataset.form === 'settings') {
     const v = n => form.elements.namedItem(n).value.trim();
     S.settings.name = v('name');
@@ -972,8 +1336,8 @@ document.addEventListener('submit', e => {
 // ====================================================================
 function addDemo() {
   const t = today(), ws = weekStart(t);
-  const ma = { id: uid(), name: 'Mathematik', classes: '5a, 7b', color: '#2563eb', logineoUrl: '', notes: 'Lehrwerk: Lambacher Schweizer' };
-  const en = { id: uid(), name: 'Englisch', classes: '8c, EF', color: '#dc2626', logineoUrl: '', notes: '' };
+  const ma = { id: uid(), name: 'Mathematik', untisKuerzel: 'M', classes: '5a, 7b', color: '#2563eb', logineoUrl: '', notes: 'Lehrwerk: Lambacher Schweizer' };
+  const en = { id: uid(), name: 'Englisch', untisKuerzel: 'E', classes: '8c, EF', color: '#dc2626', logineoUrl: '', notes: '' };
   S.subjects.push(ma, en);
   const m1 = { id: uid(), title: 'Einstieg: Pizza-Brüche (Folie)', status: 'vorhanden', subjectId: ma.id, projectId: '', url: '', note: '' };
   const m2 = { id: uid(), title: 'AB Brüche erweitern & kürzen', status: 'vorhanden', subjectId: ma.id, projectId: '', url: '', note: '' };
@@ -1021,12 +1385,49 @@ function addDemo() {
   };
   at(0, 8, 0, 270, 'Unterricht'); at(0, 15, 0, 120, 'Vorbereitung', ma.id); at(1, 8, 0, 225, 'Unterricht'); at(1, 16, 0, 150, 'Korrektur', en.id);
   at(2, 8, 0, 270, 'Unterricht'); at(2, 15, 0, 90, 'Konferenz / Besprechung'); at(2, 19, 0, 60, 'Projekte', '', er.id);
+
+  // Klassenleitung
+  const kl = { id: uid(), name: '7b', year: '2026/27', size: 27, room: 'A204', coTeacher: 'Herr B.', color: '#db2777', parentReps: 'Vorsitz: Frau S. (über Schulmail erreichbar)', notes: '' };
+  S.classes.push(kl);
+  S.classEvents.push(
+    { id: uid(), classId: kl.id, title: 'Elternsprechtag', date: addDays(t, 9), time: '15:00', place: 'A204', note: '' },
+    { id: uid(), classId: kl.id, title: 'Klassenpflegschaft 2. Halbjahr', date: addDays(t, 20), time: '19:00', place: 'Aula', note: 'TOP: Klassenfahrt, Handyregeln' },
+  );
+  S.materials.push(
+    { id: uid(), title: 'Einverständnis Wandertag', status: 'vorhanden', subjectId: '', projectId: '', classId: kl.id, url: '', note: 'Abgabe bis Freitag', returnTotal: 27, returnCount: 19 },
+    { id: uid(), title: 'Elternbrief Klassenfahrt', status: 'vorhanden', subjectId: '', projectId: '', classId: kl.id, url: '', note: '', returnTotal: 27, returnCount: 27 },
+    { id: uid(), title: 'Protokoll Klassenpflegschaft', status: 'vorhanden', subjectId: '', projectId: '', classId: kl.id, url: '', note: '' },
+  );
+  S.contacts.push(
+    { id: uid(), classId: kl.id, date: addDays(t, -3), kind: 'Telefonat', who: 'Eltern von L. M.', topic: 'Hausaufgaben fehlen häufig', result: 'Wöchentliche Rückmeldung per Hausaufgabenheft vereinbart.', followUp: addDays(t, 11) },
+  );
+  S.tasks.push(
+    { id: uid(), title: 'Wiedervorlage: Hausaufgaben fehlen häufig (Eltern von L. M.)', due: addDays(t, 11), classId: kl.id, subjectId: '', projectId: '', priority: false, done: false },
+    { id: uid(), title: 'Einladung Elternsprechtag verschicken', due: addDays(t, 2), classId: kl.id, subjectId: '', projectId: '', priority: true, done: false },
+  );
+
+  // Simulierter WebUntis-Import (diese + nächste Woche) mit zwei Änderungen
+  const times = ['07:55', '08:45', '09:50', '10:40', '11:45', '12:35', '13:30', '14:20'];
+  S.settings.periodTimes = times;
+  const evs = [];
+  for (const w of [0, 7]) for (const sl of S.timetable) {
+    const d = addDays(ws, w + sl.day); const su = subj(sl.subjectId);
+    const st = new Date(`${d}T${times[sl.period - 1]}`).getTime();
+    evs.push({ start: st, end: st + 45 * 60000, summary: `${su.untisKuerzel} ${sl.klasse}`, location: sl.room, description: '', status: '' });
+  }
+  evs.sort((a, b) => a.start - b.start);
+  const fut = evs.filter(e => e.start > Date.now());
+  const changes = [];
+  if (fut[1]) { fut[1].status = 'CANCELLED'; changes.push({ type: 'entfällt', ev: fut[1] }); }
+  if (fut[3]) { const before = { ...fut[3] }; fut[3].location = 'C011'; changes.push({ type: 'geändert', ev: fut[3], before }); }
+  S.untis = { events: evs, changes, importedAt: Date.now() };
 }
 
 // ====================================================================
 // Start
 // ====================================================================
 render();
+if (S.settings.untisUrl && Date.now() - (S.untis.importedAt || 0) > 3600e3) refreshUntis(true);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

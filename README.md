@@ -8,7 +8,8 @@ Er läuft im Browser, lässt sich wie eine App auf den Home-Bildschirm legen und
 | Bereich | Was es kann |
 |---|---|
 | **Heute** | Heutige Stunden mit dem nächsten geplanten Thema und dem Materialstand, fällige Aufgaben, fehlendes Material der nächsten 14 Tage, Wochenarbeitszeit, Projekte |
-| **Stundenplan** | Wochenraster mit Fach, Lerngruppe und Raum |
+| **Stundenplan & WebUntis** | Import der iCal-Datei aus WebUntis (optional über den Abo-Link). Nach jedem Import werden Änderungen erkannt: Ausfall, Vertretung, Raumwechsel. Wochenansicht und ein Wochenraster, das sich aus WebUntis übernehmen lässt. |
+| **Klassenleitung** | Pro Klasse: Termine (Elternabend, Elternsprechtag …), To-dos, Dokumente mit Rücklauf-Zähler (z. B. 19/27 Einverständniserklärungen), Elternkontakte mit Wiedervorlage, Zeiterfassung für Elternarbeit |
 | **Fächer** | Übersicht pro Fach: Unterrichtsreihen, Materialstand in Prozent, Material-Bibliothek, Logineo-Kurslink |
 | **Reihenplanung** | Stunden einer Reihe mit Datum, Thema und verknüpftem Material. Ampel pro Stunde (Material da / teilweise / fehlt). *Termine füllen* berechnet Daten aus dem Stundenplan. *Kopieren* übernimmt eine Reihe für eine Parallelklasse. |
 | **Material** | Dateien vom iPad (PDF, Bilder …), Links (Logineo, OneDrive, Videos) oder Notizen mit Status. Ein Material kann mit mehreren Stunden verknüpft werden. |
@@ -21,7 +22,16 @@ Er läuft im Browser, lässt sich wie eine App auf den Home-Bildschirm legen und
 
 Alle Daten liegen ausschließlich lokal auf dem Gerät, in localStorage und IndexedDB. Es gibt keinen Server.
 Unter *Einstellungen → Sicherung exportieren* lässt sich eine Sicherungsdatei (inklusive Dateien) erstellen.
-Speichere keine personenbezogenen Schülerdaten in der App.
+In der Klassenleitung möglichst Kürzel statt Namen verwenden. In NRW regelt die VO-DV I, welche Schülerdaten auf privaten Geräten verarbeitet werden dürfen; dafür braucht es eine Genehmigung der Schulleitung.
+
+## WebUntis
+
+Eine reine Web-App darf WebUntis meist nicht direkt abfragen, weil der Browser das blockiert. Deshalb gibt es diesen Weg:
+1. In WebUntis (Safari) den eigenen Stundenplan als **iCal** exportieren und die Datei in der Dateien-App sichern.
+2. Im Assistenten unter *Stundenplan → iCal-Datei importieren* einlesen.
+3. Wenn du später erneut importierst, zeigt der Assistent alle Änderungen gegenüber dem letzten Stand.
+
+Bei jedem Fach das **WebUntis-Kürzel** (z. B. `M`) eintragen, damit Stunden den Fächern und Reihen zugeordnet werden.
 
 ## Auf das iPad bringen
 
