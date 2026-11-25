@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lehrer-Assistent</title>
+  <meta name="description" content="Persönlicher Assistent für den Lehreralltag: Fächer, Reihenplanung, Material, Aufgaben, Projekte und Arbeitszeit.">
+  <meta name="theme-color" content="#1e3a5f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Assistent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar" id="nav" aria-label="Hauptnavigation">
+      <div class="brand">
+        <span class="brand-logo" aria-hidden="true">LA</span>
+        <span class="brand-name">Lehrer-Assistent</span>
+      </div>
+      <a href="#/heute" data-nav="heute"><span class="ico" aria-hidden="true">🏠</span><span>Heute</span></a>
+      <a href="#/stundenplan" data-nav="stundenplan"><span class="ico" aria-hidden="true">🗓️</span><span>Stundenplan</span></a>
+      <a href="#/faecher" data-nav="faecher"><span class="ico" aria-hidden="true">📚</span><span>Fächer</span></a>
+      <a href="#/klassen" data-nav="klassen"><span class="ico" aria-hidden="true">👪</span><span>Klassenleitung</span></a>
+      <a href="#/aufgaben" data-nav="aufgaben"><span class="ico" aria-hidden="true">✅</span><span>Aufgaben</span></a>
+      <a href="#/projekte" data-nav="projekte"><span class="ico" aria-hidden="true">🌍</span><span>Projekte</span></a>
+      <a href="#/zeit" data-nav="zeit"><span class="ico" aria-hidden="true">⏱️</span><span>Arbeitszeit</span></a>
+      <a href="#/einstellungen" data-nav="einstellungen"><span class="ico" aria-hidden="true">⚙️</span><span>Einstellungen</span></a>
+      <div class="nav-bottom">
+        <button type="button" class="timer-pill" id="timerPill" data-act="gotoTime" hidden></button>
+        <button type="button" class="logineo-link" data-act="openLogineo">Logineo LMS öffnen ↗</button>
+      </div>
+    </nav>
+    <main id="main" tabindex="-1"></main>
+  </div>
+  <dialog id="modal"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
